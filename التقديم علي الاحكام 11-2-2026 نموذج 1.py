@@ -1,0 +1,811 @@
+﻿# ================= LIBRARIES =================
+import ssl
+import time
+import os
+import shutil
+import socket
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from difflib import get_close_matches
+from pathlib import Path
+
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import TimeoutException
+
+# webdriver_manager import kept but not used after local driver switch
+from webdriver_manager.chrome import ChromeDriverManager
+
+
+# ================= FIX SSL =================
+ssl._create_default_https_context = ssl._create_unverified_context
+
+
+# ================= GUI =================
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("PPO Automation - FULL (Sequential)")
+        self.geometry("680x500")
+        self.resizable(False, False)
+
+        self.excel_path = tk.StringVar()
+        self.pdf_path = tk.StringVar()
+        self.otp_code = tk.StringVar()
+        self.captcha_code = tk.StringVar()
+        self.attach_existing = tk.BooleanVar(value=False)
+        self.debug_port = tk.StringVar(value="9222")
+        self.script_dir = Path(__file__).resolve().parent
+        self.status_var = tk.StringVar(value="جاهز")
+
+        # إطار اختيار الملفات
+        self.files_frame = tk.Frame(self)
+        tk.Label(self.files_frame, text="ملف Excel").pack()
+        tk.Entry(self.files_frame, textvariable=self.excel_path, width=85).pack()
+        tk.Button(self.files_frame, text="اختيار Excel", command=self.select_excel).pack(pady=5)
+
+        tk.Label(self.files_frame, text="ملف PDF (التوكيل)").pack()
+        tk.Entry(self.files_frame, textvariable=self.pdf_path, width=85).pack()
+        tk.Button(self.files_frame, text="اختيار PDF", command=self.select_pdf).pack(pady=5)
+
+        self.files_frame.pack()
+
+        # وضع التجربة على متصفح مفتوح
+        self.attach_frame = tk.Frame(self)
+        tk.Checkbutton(
+            self.attach_frame,
+            text="تجربة على متصفح مفتوح (تخطي تسجيل الدخول)",
+            variable=self.attach_existing
+        ).pack(side=tk.LEFT, padx=4)
+        tk.Label(self.attach_frame, text="Port").pack(side=tk.LEFT)
+        tk.Entry(self.attach_frame, textvariable=self.debug_port, width=8).pack(side=tk.LEFT, padx=4)
+        self.attach_frame.pack(pady=4)
+
+        self.start_btn = tk.Button(self, text="بدء التشغيل", command=self.start)
+        self.start_btn.pack(pady=10)
+
+        # إطار OTP (مخفي حتى نحتاجه)
+        self.otp_frame = tk.Frame(self)
+        tk.Label(self.otp_frame, text="OTP").pack(side=tk.LEFT)
+        tk.Entry(self.otp_frame, textvariable=self.otp_code, width=20).pack(side=tk.LEFT)
+        tk.Button(self.otp_frame, text="تأكيد", command=self.submit_otp).pack(side=tk.LEFT)
+
+        # التحكم اليدوي في الكابتشا والخطوات (مخفي حتى نحتاجه)
+        self.step_frame = tk.Frame(self)
+        tk.Label(self.step_frame, text="الكابتشا").pack(side=tk.LEFT)
+        tk.Entry(self.step_frame, textvariable=self.captcha_code, width=20).pack(side=tk.LEFT, padx=4)
+        self.next_btn = tk.Button(self.step_frame, text="الخطوة التالية", command=self.next_step, state=tk.DISABLED)
+        self.next_btn.pack(side=tk.LEFT)
+
+        # حالة التنفيذ
+        tk.Label(self, textvariable=self.status_var, fg="blue").pack(pady=8)
+
+        # زر إعادة التحميل اليدوي للتعافي من الأخطاء أو عدم تحميل الكابتشا
+        self.reload_btn = tk.Button(self, text="إعادة تحميل", command=self.reload_current, state=tk.DISABLED)
+        self.reload_btn.pack(pady=4)
+
+        self.driver = None
+        self.wait = None
+        self.fixed = {}
+        self.cases = None
+        self.current_index = 0
+        self.case_tabs = []
+        self.state = "idle"  # idle -> waiting_captcha -> ready
+        self.set_default_file_paths()
+
+    # ================= HELPERS =================
+    def err(self, msg, raise_exc=True):
+        messagebox.showerror("خطأ", msg)
+        if raise_exc:
+            raise Exception(msg)
+
+    def build_driver(self, options):
+        # 1) Prefer local chromedriver next to script (offline-safe)
+        local_driver = self.script_dir / "chromedriver.exe"
+        if local_driver.is_file():
+            service = Service(str(local_driver))
+            return webdriver.Chrome(service=service, options=options)
+
+        # 2) Try Selenium Manager (uses PATH / auto resolution)
+        try:
+            return webdriver.Chrome(options=options)
+        except Exception:
+            pass
+
+        # 3) Fallback to webdriver_manager with SSL verify disabled
+        # Useful behind company proxy/self-signed cert chains.
+        os.environ.setdefault("WDM_SSL_VERIFY", "0")
+        service = Service(ChromeDriverManager().install())
+        return webdriver.Chrome(service=service, options=options)
+
+    def load_input_data(self):
+        if not self.excel_path.get() or not self.pdf_path.get():
+            self.err("اختار ملف Excel و PDF")
+
+        if not os.path.isfile(self.excel_path.get()):
+            self.err("مسار ملف Excel غير موجود")
+        if not os.path.isfile(self.pdf_path.get()):
+            self.err("مسار ملف PDF غير موجود")
+
+        # Read Excel
+        df_fixed = pd.read_excel(self.excel_path.get(), sheet_name="Fixed_Data")
+        self.fixed = dict(zip(df_fixed["الحقل"], df_fixed["البيانات"]))
+
+        self.cases = pd.read_excel(self.excel_path.get(), sheet_name="Cases_Data")
+        if self.cases.empty:
+            self.err("Cases_Data فاضي")
+
+    def start_from_open_browser(self):
+        port = (self.debug_port.get() or "").strip()
+        if not port.isdigit():
+            self.err("رقم الـ Port غير صحيح. مثال: 9222")
+
+        port_num = int(port)
+        if not self.is_debug_port_open(port_num):
+            self.err(
+                "لم يتم العثور على Chrome debug على هذا الـ Port.\n"
+                "شغّل كروم بهذا الأمر أولًا:\n"
+                "chrome.exe --remote-debugging-port=9222 --user-data-dir=C:\\chrome-debug"
+            )
+
+        self.status_var.set("جاري الاتصال بالمتصفح المفتوح...")
+        options = Options()
+        options.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}")
+        self.driver = self.build_attach_driver(options)
+        self.wait = WebDriverWait(self.driver, 30)
+
+        # ابحث في كل التبويبات/الإطارات عن صفحة الطلبات (P23_CAUSE_NUMBER)
+        # لا توقف التنفيذ مبكرًا: أحيانًا الحقل يتأخر أو يكون داخل iframe.
+        found_requests = self.switch_to_requests_tab(timeout_per_tab=6)
+
+        try:
+            self.otp_frame.pack_forget()
+        except Exception:
+            pass
+        self.start_btn.config(state=tk.DISABLED)
+        self.reload_btn.config(state=tk.NORMAL)
+        self.current_index = 0
+        self.case_tabs = []
+        if found_requests:
+            self.status_var.set("متصل بمتصفح مفتوح. تم العثور على صفحة الطلبات.")
+        else:
+            self.status_var.set("متصل بمتصفح مفتوح. لم يتم تأكيد الصفحة وسيتم المحاولة مباشرة.")
+        self.prepare_all_cases_tabs()
+
+    def is_debug_port_open(self, port, host="127.0.0.1", timeout=1.5):
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
+    def find_local_chromedriver(self):
+        local_driver = self.script_dir / "chromedriver.exe"
+        if local_driver.is_file():
+            return str(local_driver)
+
+        on_path = shutil.which("chromedriver")
+        if on_path:
+            return on_path
+
+        return None
+
+    def build_attach_driver(self, options):
+        """
+        Driver creation for "attach to open browser":
+        1) local chromedriver next to script
+        2) chromedriver on PATH
+        3) Selenium Manager
+        """
+        driver_path = self.find_local_chromedriver()
+        if driver_path:
+            return webdriver.Chrome(service=Service(driver_path), options=options)
+
+        try:
+            return webdriver.Chrome(options=options)
+        except Exception as e:
+            self.err(
+                "تعذر الاتصال بالمتصفح المفتوح.\n"
+                "ثبّت chromedriver (بجانب السكربت أو على PATH) أو تأكد من توافق Chrome/Selenium.\n"
+                f"التفاصيل: {e}"
+            )
+
+    def switch_to_requests_tab(self, timeout_per_tab=6):
+        """
+        جرّب كل تبويبات المتصفح حتى نجد صفحة الطلبات التي تحتوي P23_CAUSE_NUMBER.
+        """
+        d = self.driver
+        handles = d.window_handles
+        for handle in handles:
+            try:
+                d.switch_to.window(handle)
+                d.switch_to.default_content()
+                WebDriverWait(d, timeout_per_tab).until(
+                    EC.presence_of_element_located((By.NAME, "P23_CAUSE_NUMBER"))
+                )
+                return True
+            except Exception:
+                # أحيانًا الصفحة تكون داخل iframe؛ جرّب البحث داخل الإطارات
+                try:
+                    d.switch_to.default_content()
+                    iframes = d.find_elements(By.TAG_NAME, "iframe")
+                    for frm in iframes:
+                        try:
+                            d.switch_to.default_content()
+                            d.switch_to.frame(frm)
+                            WebDriverWait(d, 1.5).until(
+                                EC.presence_of_element_located((By.NAME, "P23_CAUSE_NUMBER"))
+                            )
+                            return True
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        d.switch_to.default_content()
+                    except Exception:
+                        pass
+                continue
+        return False
+
+    def get_fixed(self, key):
+        if key not in self.fixed or pd.isna(self.fixed[key]):
+            self.err(f"الحقل [{key}] ناقص في Fixed_Data")
+        return str(self.fixed[key]).strip()
+
+    def get_case(self, row, col):
+        if col not in row or pd.isna(row[col]):
+            self.err(f"الحقل [{col}] ناقص في Cases_Data\nصف {row.name+2}")
+        return str(row[col]).strip()
+
+    def clear_and_type(self, locator_by, locator_value, text):
+        e = self.wait.until(EC.presence_of_element_located((locator_by, locator_value)))
+        try:
+            e.clear()
+        except Exception:
+            pass
+        e.send_keys(text)
+
+    def select_option_fuzzy(self, locator_by, locator_value, text):
+        """اختر من dropdown بأقرب مطابقة (مرن في التطابق)"""
+        select = Select(self.wait.until(EC.presence_of_element_located((locator_by, locator_value))))
+        
+        # احصل على كل الخيارات
+        all_options = [option.text.strip() for option in select.options]
+        
+        # ابحث عن تطابق دقيق أولاً
+        if text in all_options:
+            select.select_by_visible_text(text)
+            return
+        
+        # ابحث عن أقرب خيار
+        matches = get_close_matches(text, all_options, n=1, cutoff=0.6)
+        if matches:
+            select.select_by_visible_text(matches[0])
+            return
+        
+        # إذا لم يوجد تطابق، رفع خطأ مع إظهار الخيارات المتاحة
+        self.err(f"لم يُعثر على '{text}' في الخيارات المتاحة:\n{', '.join(all_options)}")
+
+    def wait_dropdown_loaded(self, locator_by, locator_value, expected_text=None, timeout=12):
+        """
+        انتظر حتى تحميل خيارات الـ dropdown التابعة (مثل قسم الشرطة بعد اختيار المحافظة).
+        إذا تم تمرير expected_text ينتظر حتى يظهر (أو أقرب مطابقة) داخل الخيارات.
+        """
+        def _is_loaded(_):
+            try:
+                elem = self.driver.find_element(locator_by, locator_value)
+                opts = [o.text.strip() for o in Select(elem).options if o.text.strip()]
+                if not opts:
+                    return False
+
+                # تجاهل خيار placeholder الشائع
+                normalized = [o for o in opts if o not in ("اختر", "اختر...", "-- اختر --")]
+                if not normalized:
+                    return False
+
+                if expected_text:
+                    if expected_text in normalized:
+                        return True
+                    return bool(get_close_matches(expected_text, normalized, n=1, cutoff=0.6))
+
+                # بدون نص متوقع: يكفي وجود أكثر من خيار فعلي
+                return len(normalized) >= 2
+            except Exception:
+                return False
+
+        WebDriverWait(self.driver, timeout).until(_is_loaded)
+
+    def switch_to_dialog_frame(self, frame_css, field_id, timeout=12):
+        """
+        انقل للـ iframe الخاص بالنافذة المنبثقة.
+        يحاول أولًا عبر frame_css، ثم fallback بالبحث عن iframe يحتوي field_id.
+        """
+        d = self.driver
+        try:
+            d.switch_to.default_content()
+        except Exception:
+            pass
+
+        try:
+            WebDriverWait(d, timeout).until(
+                EC.frame_to_be_available_and_switch_to_it((By.CSS_SELECTOR, frame_css))
+            )
+            WebDriverWait(d, timeout).until(EC.presence_of_element_located((By.ID, field_id)))
+            return
+        except Exception:
+            d.switch_to.default_content()
+
+        # fallback: جرّب كل iframes حتى نجد الحقل المطلوب
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            iframes = d.find_elements(By.TAG_NAME, "iframe")
+            for frm in iframes:
+                try:
+                    d.switch_to.default_content()
+                    d.switch_to.frame(frm)
+                    if d.find_elements(By.ID, field_id):
+                        return
+                except Exception:
+                    pass
+            time.sleep(0.2)
+        d.switch_to.default_content()
+        raise TimeoutException(f"لم يتم العثور على iframe يحتوي الحقل {field_id}")
+
+    def find_latest_file(self, patterns):
+        candidates = []
+        for pattern in patterns:
+            candidates.extend(self.script_dir.glob(pattern))
+
+        files = [f for f in candidates if f.is_file()]
+        if not files:
+            return ""
+
+        latest = max(files, key=lambda f: f.stat().st_mtime)
+        return str(latest.resolve())
+
+    def set_default_file_paths(self):
+        excel_default = self.find_latest_file(["*.xlsx", "*.xls"])
+        pdf_default = self.find_latest_file(["*.pdf"])
+
+        if excel_default:
+            self.excel_path.set(excel_default)
+        if pdf_default:
+            self.pdf_path.set(pdf_default)
+
+    # ================= FILE PICKERS =================
+    def select_excel(self):
+        self.excel_path.set(filedialog.askopenfilename(filetypes=[["Excel", "*.xlsx;*.xls"]]))
+
+    def select_pdf(self):
+        self.pdf_path.set(filedialog.askopenfilename(filetypes=[["PDF", "*.pdf"]]))
+
+    # ================= START =================
+    def start(self):
+        try:
+            self.load_input_data()
+
+            if self.attach_existing.get():
+                self.start_from_open_browser()
+                return
+
+            # Chrome using local chromedriver
+            options = Options()
+            options.add_argument("--start-maximized")
+            options.add_experimental_option("detach", True)
+            port = (self.debug_port.get() or "9222").strip()
+            if not port.isdigit():
+                port = "9222"
+            options.add_argument(f"--remote-debugging-port={port}")
+
+            self.driver = self.build_driver(options)
+
+            self.wait = WebDriverWait(self.driver, 30)
+
+            self.driver.get("https://www.ppo.gov.eg/ppo/r/ppoportal/ppoportal/login-page")
+
+            self.wait.until(EC.presence_of_element_located((By.NAME, "P9999_USERNAME"))).send_keys(self.get_fixed("اسم_المستخدم"))
+            self.wait.until(EC.presence_of_element_located((By.NAME, "P9999_PASSWORD"))).send_keys(self.get_fixed("الرقم_السري"))
+            self.wait.until(EC.element_to_be_clickable((By.ID, "GENERATE_OTP"))).click()
+
+            # أخفِ عناصر اختيار الملفات بعد بدء التشغيل
+            try:
+                self.files_frame.pack_forget()
+            except Exception:
+                pass
+            self.start_btn.config(state=tk.DISABLED)
+
+            # أظهر إطار OTP فقط
+            self.otp_frame.pack(pady=10)
+            self.status_var.set("انتظر إدخال OTP")
+
+        except Exception as e:
+            self.err(f"فشل البدء: {e}", raise_exc=False)
+
+    # ================= OTP =================
+    def submit_otp(self):
+        try:
+            self.wait.until(EC.presence_of_element_located((By.ID, "P9999_OTP_VER"))).send_keys(self.otp_code.get())
+            self.wait.until(EC.element_to_be_clickable((By.ID, "LOGIN"))).click()
+
+            # تأكد من الانتقال
+            self.wait.until(EC.presence_of_element_located((By.ID, "navbarDropdownMenuLink")))
+            self.after_login()
+
+        except Exception as e:
+            self.err(f"فشل OTP: {e}", raise_exc=False)
+
+    # ================= AFTER LOGIN =================
+    def after_login(self):
+        d, w = self.driver, self.wait
+        try:
+            # Open cases page
+            w.until(EC.element_to_be_clickable((By.ID, "navbarDropdownMenuLink"))).click()
+            w.until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".dropdown-menu .dropdown-item:nth-child(2)"))).click()
+            w.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "a.a-CardView-fullLink[onclick*=\"go_to_page('1244','23')\"]"))).click()
+
+            w.until(EC.presence_of_element_located((By.NAME, "P23_CAUSE_NUMBER")))
+            self.status_var.set("تم فتح صفحة الطلبات")
+
+            # أخفِ OTP عند الانتهاء منه
+            try:
+                self.otp_frame.pack_forget()
+            except Exception:
+                pass
+
+            # تفعيل زر إعادة التحميل بعد الدخول
+            self.reload_btn.config(state=tk.NORMAL)
+
+            # تجهيز كل الطلبات في تبويبات ثم الوقوف على كابتشا أول طلب
+            self.current_index = 0
+            self.case_tabs = []
+            self.prepare_all_cases_tabs()
+
+        except Exception as e:
+            self.err(f"فشل بعد تسجيل الدخول: {e}", raise_exc=False)
+
+    # ================= MULTI-TAB CASE PREPARATION =================
+    def prepare_case_in_current_tab(self, row, idx, total):
+        d, w = self.driver, self.wait
+        self.status_var.set(f"تجهيز الطلب {idx+1}/{total} | رقم الطلب: {row['رقم_الطلب']}")
+
+        # ===== CASE =====
+        self.clear_and_type(By.NAME, "P23_CAUSE_NUMBER", self.get_case(row, "رقم_القضية"))
+        self.clear_and_type(By.NAME, "P23_CAUSE_YEAR", self.get_case(row, "سنة_القضية"))
+        self.select_option_fuzzy(By.ID, "P23_TABLE", self.get_case(row, "الجدول"))
+        self.select_option_fuzzy(By.ID, "P23_GOV", self.get_case(row, "المحافظة"))
+        police_department = self.get_case(row, "قسم_الشرطة")
+        self.wait_dropdown_loaded(By.ID, "P23_POLICE_DEPARTMENT", expected_text=police_department, timeout=12)
+        self.select_option_fuzzy(By.ID, "P23_POLICE_DEPARTMENT", police_department)
+        self.select_option_fuzzy(By.ID, "P23_SEND_TO", self.get_case(row, "الي"))
+
+        # ===== FIXED =====
+        self.select_option_fuzzy(By.ID, "P23_AGENT_DESCRIPTION", self.get_fixed("توصيف_الوكيل"))
+        self.clear_and_type(By.ID, "P23_AGENT_NUMBER", self.get_fixed("رقم_التوكيل"))
+        self.clear_and_type(By.ID, "P23_CARD_NUMBER", self.get_fixed("رقم_الكارنية"))
+        self.select_option_fuzzy(By.ID, "P23_ENTRY_TYPE", self.get_fixed("نوع_القيد"))
+        self.clear_and_type(By.ID, "P23_ENTITY", self.get_fixed("جهة_إصدار_التوكيل"))
+
+        # ===== ADD CLIENT =====
+        w.until(EC.element_to_be_clickable((By.ID, "B1"))).click()
+        iframe = w.until(EC.presence_of_element_located((By.TAG_NAME, "iframe")))
+        d.switch_to.frame(iframe)
+
+        self.select_option_fuzzy(By.ID, "P26_PETITIONER_DESC", self.get_fixed("صفة_مقدم_الطلب"))
+        self.select_option_fuzzy(By.ID, "P26_IDENTITY_TYPE", self.get_fixed("نوع_الهوية"))
+
+        self.clear_and_type(By.ID, "P26_NATIONAL_ID", self.get_fixed("الرقم_القومي"))
+        self.clear_and_type(By.ID, "P26_FIRST_NAME", self.get_fixed("الاسم_الاول"))
+        self.clear_and_type(By.ID, "P26_SECOND_NAME", self.get_fixed("الاسم_الثاني"))
+        self.clear_and_type(By.ID, "P26_THIRD_NAME", self.get_fixed("الاسم_الثالث"))
+        self.clear_and_type(By.ID, "P26_FOURTH_NAME", self.get_fixed("الاسم_الرابع"))
+
+        self.clear_and_type(By.ID, "P26_ADDRESS", self.get_fixed("العنوان"))
+        self.clear_and_type(By.ID, "P26_EMAIL", self.get_fixed("البريد_الالكتروني"))
+
+        w.until(EC.element_to_be_clickable((By.ID, "B3"))).click()
+        d.switch_to.default_content()
+
+        # ===== ADD DOCUMENT =====
+        doc_btn_locator = (
+            By.CSS_SELECTOR,
+            "button[aria-label='إضافة مستند'], "
+            "button[title='إضافة مستند'], "
+            "button[onclick*='add-attatchment']"
+        )
+        w.until(EC.element_to_be_clickable(doc_btn_locator)).click()
+        self.switch_to_dialog_frame("iframe[src*='add-attatchment']", "P21_ATTATCHMENT_TYPE", timeout=15)
+
+        self.select_option_fuzzy(By.ID, "P21_ATTATCHMENT_TYPE", self.get_fixed("نوع_المستند"))
+        w.until(EC.presence_of_element_located((By.ID, "P21_ATTATCHMENT_input"))).send_keys(os.path.abspath(self.pdf_path.get()))
+        w.until(EC.element_to_be_clickable((By.ID, "B3"))).click()
+        d.switch_to.default_content()
+        WebDriverWait(d, 12).until(
+            EC.invisibility_of_element_located((By.CSS_SELECTOR, "iframe[src*='add-attatchment']"))
+        )
+        w.until(EC.element_to_be_clickable((By.ID, "P23_RECEIPT")))
+        time.sleep(0.5)
+
+        # ===== DELIVERY =====
+        self.select_option_fuzzy(By.ID, "P23_RECEIPT", self.get_fixed("طريقة_الإستلام"))
+        self.select_option_fuzzy(By.ID, "P23_DELIVERY_GOV", self.get_fixed("محافظة_التوصيل"))
+        self.clear_and_type(By.ID, "P23_CONTACT_PHONE_NUMBER", self.get_fixed("رقم_تليفون_للتواصل"))
+        self.clear_and_type(By.ID, "P23_DELIVERY_ADD", self.get_fixed("عنوان_التوصيل"))
+        w.until(EC.element_to_be_clickable((By.ID, "P23_TERMS_CONDITIONS_LABEL"))).click()
+
+        d.switch_to.default_content()
+
+    def open_request_tab(self, request_url):
+        d, w = self.driver, self.wait
+        d.execute_script("window.open(arguments[0], '_blank');", request_url)
+        d.switch_to.window(d.window_handles[-1])
+        d.switch_to.default_content()
+        w.until(EC.presence_of_element_located((By.NAME, "P23_CAUSE_NUMBER")))
+
+    def switch_to_case_tab(self, index):
+        if index < 0 or index >= len(self.case_tabs):
+            self.err("فهرس التبويب المطلوب غير صحيح")
+        self.driver.switch_to.window(self.case_tabs[index])
+        self.driver.switch_to.default_content()
+
+    def focus_captcha_field(self):
+        d = self.driver
+        try:
+            try:
+                cap_elem = WebDriverWait(d, 2).until(
+                    EC.presence_of_element_located((By.ID, "P23_CAPTCHA_CODE"))
+                )
+            except Exception:
+                cap_elem = WebDriverWait(d, 4).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "input[name*='captcha'], input[id*='captcha']"))
+                )
+            d.execute_script("arguments[0].scrollIntoView({block:'center'});", cap_elem)
+            try:
+                cap_elem.click()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def fill_captcha_in_current_tab(self, captcha_text):
+        w = self.wait
+        cap_elem = w.until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input[name*='captcha'], input[id*='captcha']"))
+        )
+        try:
+            cap_elem.clear()
+        except Exception:
+            pass
+        cap_elem.send_keys(captcha_text)
+
+    def click_first_visible(self, locators):
+        d = self.driver
+        for by, locator in locators:
+            try:
+                elements = d.find_elements(by, locator)
+            except Exception:
+                continue
+            for elem in elements:
+                try:
+                    if not elem.is_displayed():
+                        continue
+                    d.execute_script("arguments[0].scrollIntoView({block:'center'});", elem)
+                    try:
+                        elem.click()
+                    except Exception:
+                        d.execute_script("arguments[0].click();", elem)
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    def click_submit_request_button(self):
+        # ترتيب محاولات مرن لأن IDs في APEX غالبًا متغيرة
+        submit_locators = [
+            (By.ID, "SUBMIT"),
+            (By.CSS_SELECTOR, "button[id*='SUBMIT'],input[id*='SUBMIT'][type='button'],input[id*='SUBMIT'][type='submit']"),
+            (By.CSS_SELECTOR, "button[title*='تقديم'],button[aria-label*='تقديم'],button[title*='إرسال'],button[aria-label*='إرسال']"),
+            (By.CSS_SELECTOR, "button[onclick*='apex.submit'],a[onclick*='apex.submit'],button[onclick*='submit'],a[onclick*='submit']"),
+            (By.XPATH, "//button[contains(normalize-space(.),'تقديم') or contains(normalize-space(.),'إرسال') or contains(normalize-space(.),'ارسال') or contains(normalize-space(.),'Submit')]"),
+            (By.XPATH, "//a[contains(normalize-space(.),'تقديم') or contains(normalize-space(.),'إرسال') or contains(normalize-space(.),'ارسال') or contains(normalize-space(.),'Submit')]"),
+        ]
+        return self.click_first_visible(submit_locators)
+
+    def click_optional_confirm(self):
+        confirm_locators = [
+            (By.XPATH, "//button[contains(normalize-space(.),'نعم') or contains(normalize-space(.),'تأكيد') or contains(normalize-space(.),'موافق') or normalize-space(.)='OK']"),
+            (By.XPATH, "//a[contains(normalize-space(.),'نعم') or contains(normalize-space(.),'تأكيد') or contains(normalize-space(.),'موافق') or normalize-space(.)='OK']"),
+            (By.CSS_SELECTOR, "button.ui-button--hot, .ui-dialog-buttonset button.t-Button--hot"),
+        ]
+        return self.click_first_visible(confirm_locators)
+
+    def detect_submission_error(self):
+        d = self.driver
+        selectors = [
+            ".t-Alert--danger",
+            ".a-Notification--error",
+            ".u-danger-text",
+            ".t-Form-error",
+        ]
+        text = ""
+        for sel in selectors:
+            try:
+                elems = d.find_elements(By.CSS_SELECTOR, sel)
+                for e in elems:
+                    if e.is_displayed():
+                        txt = e.text.strip()
+                        if txt:
+                            text += f" {txt}"
+            except Exception:
+                pass
+
+        text = text.strip()
+        if not text:
+            return None
+
+        # اعتبرها رسالة خطأ فقط إذا كانت دلالتها واضحة
+        lowered = text.lower()
+        keywords = ["خطأ", "غير صحيح", "كود التحقق", "captcha", "تحقق", "invalid"]
+        if any(k in lowered for k in keywords):
+            return text
+        return None
+
+    def submit_current_request(self, captcha_text):
+        self.fill_captcha_in_current_tab(captcha_text)
+
+        if not self.click_submit_request_button():
+            return False, "تعذر العثور على زر تقديم الطلب."
+
+        # أحيانًا يظهر تأكيد إضافي بعد الضغط على تقديم
+        time.sleep(0.3)
+        self.click_optional_confirm()
+
+        # امنح الصفحة فرصة لإظهار نتيجة التقديم
+        time.sleep(1.0)
+        err_text = self.detect_submission_error()
+        if err_text:
+            return False, err_text
+        return True, ""
+
+    def activate_current_case_for_captcha(self):
+        self.switch_to_case_tab(self.current_index)
+        self.focus_captcha_field()
+        self.step_frame.pack(pady=8)
+        self.next_btn.config(state=tk.NORMAL)
+        self.state = "waiting_captcha"
+        row = self.cases.iloc[self.current_index]
+        self.status_var.set(
+            f"جاهز للكابتشا {self.current_index+1}/{len(self.cases)} | رقم الطلب: {row['رقم_الطلب']}"
+        )
+
+    def prepare_all_cases_tabs(self):
+        d, w = self.driver, self.wait
+        try:
+            total = len(self.cases)
+            if total == 0:
+                self.err("Cases_Data فاضي")
+
+            try:
+                self.step_frame.pack_forget()
+            except Exception:
+                pass
+            self.next_btn.config(state=tk.DISABLED)
+            self.state = "ready"
+            self.case_tabs = []
+            self.current_index = 0
+
+            d.switch_to.default_content()
+            w.until(EC.presence_of_element_located((By.NAME, "P23_CAUSE_NUMBER")))
+            request_url = d.current_url
+
+            for idx in range(total):
+                if idx == 0:
+                    d.switch_to.default_content()
+                else:
+                    self.open_request_tab(request_url)
+
+                row = self.cases.iloc[idx]
+                self.prepare_case_in_current_tab(row, idx, total)
+                self.case_tabs.append(d.current_window_handle)
+
+            self.current_index = 0
+            self.activate_current_case_for_captcha()
+            messagebox.showinfo("جاهز", f"تم تجهيز {total} طلب في تبويبات منفصلة.\nابدأ بإدخال كابتشا الطلب الأول.")
+        except Exception as e:
+            self.err(f"فشل تجهيز الطلبات في التبويبات: {e}", raise_exc=False)
+
+    # ================= MANUAL RECOVERY / RELOAD =================
+    def reload_current(self):
+        try:
+            if not self.driver or not self.wait:
+                self.err("المتصفح غير مُهيأ بعد. ابدأ التشغيل أولاً.")
+            if not self.case_tabs:
+                self.err("لا يوجد طلبات مجهزة لإعادة تحميلها بعد.")
+
+            self.status_var.set("جاري إعادة التحميل...")
+            self.switch_to_case_tab(self.current_index)
+
+            # ارجع للإطار الأساسي ثم أعد تحميل الصفحة
+            try:
+                self.driver.switch_to.default_content()
+            except Exception:
+                pass
+
+            self.driver.refresh()
+
+            # انتظر ظهور نموذج الطلبات
+            self.wait.until(EC.presence_of_element_located((By.NAME, "P23_CAUSE_NUMBER")))
+
+            # أخفِ إطار الكابتشا إن كان ظاهرًا
+            try:
+                self.step_frame.pack_forget()
+            except Exception:
+                pass
+
+            row = self.cases.iloc[self.current_index]
+            self.prepare_case_in_current_tab(row, self.current_index, len(self.cases))
+            self.activate_current_case_for_captcha()
+            self.status_var.set("تمت إعادة تجهيز الطلب الحالي. أدخل الكابتشا مجددًا.")
+        except Exception as e:
+            self.err(f"فشل إعادة التحميل: {e}", raise_exc=False)
+
+    # استكمال بعد إدخال الكابتشا والضغط على الخطوة التالية
+    def next_step(self):
+        w = self.wait
+        try:
+            if self.state != "waiting_captcha":
+                return
+            if not self.case_tabs:
+                self.err("لا يوجد تبويبات طلبات للتنقل بينها.")
+
+            self.switch_to_case_tab(self.current_index)
+            captcha_value = (self.captcha_code.get() or "").strip()
+            if not captcha_value:
+                self.err("ادخل الكابتشا أولًا.")
+
+            # اكتب الكابتشا في الحقل المحدد ثم اضغط زر التقديم المحدد
+            captcha_elem = w.until(EC.presence_of_element_located((By.ID, "P23_CAPTCHA_CODE")))
+            try:
+                captcha_elem.clear()
+            except Exception:
+                pass
+            captcha_elem.send_keys(captcha_value)
+
+            submit_btn = w.until(EC.element_to_be_clickable((By.ID, "cid-submit")))
+            submit_btn.click()
+            time.sleep(0.6)
+
+            # إخفاء إطار الكابتشا مؤقتاً
+            try:
+                self.step_frame.pack_forget()
+            except Exception:
+                pass
+
+            # تم تقديم الطلب الحالي، انتقل للطلب التالي الجاهز
+            self.captcha_code.set("")
+            self.state = "ready"
+            self.next_btn.config(state=tk.DISABLED)
+
+            if self.current_index + 1 >= len(self.case_tabs):
+                self.status_var.set("تم تقديم كل الطلبات.")
+                messagebox.showinfo("انتهى", "تم تقديم جميع الطلبات.")
+                return
+
+            self.current_index += 1
+            self.activate_current_case_for_captcha()
+
+        except Exception as e:
+            self.err(f"فشل الاستكمال بعد الكابتشا: {e}", raise_exc=False)
+
+
+# ================= RUN =================
+if __name__ == "__main__":
+    App().mainloop()
+

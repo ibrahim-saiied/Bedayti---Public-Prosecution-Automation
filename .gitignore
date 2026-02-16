@@ -1,0 +1,17 @@
+﻿__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+*.exe
+*.rar
+
+*.xlsx
+
+.license_key.json
+*/.license_key.json
+
+# build outputs
+build/
+dist/
+*.spec
