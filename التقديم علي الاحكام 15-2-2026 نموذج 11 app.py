@@ -50,7 +50,7 @@ from license_service import (
 # ================= FIX SSL =================
 ssl._create_default_https_context = ssl._create_unverified_context
 
-CURRENT_VERSION = "1.0.1"
+CURRENT_VERSION = "1.0.2"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/main/version.json"
 
 
@@ -426,22 +426,12 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
                 return
 
             notes = str(manifest.get("notes", "")).strip()
-            mandatory = bool(manifest.get("mandatory", False))
             msg = f"يوجد تحديث جديد للإصدار {latest}."
             if notes:
                 msg += f"\n\nملاحظات:\n{notes}"
-            msg += "\n\nهل تريد تنزيله الآن؟"
-
-            if mandatory:
-                proceed = messagebox.askyesno("تحديث إجباري", msg)
-                if not proceed:
-                    messagebox.showwarning("تحديث مطلوب", "يجب التحديث قبل المتابعة.")
-                    self.destroy()
-                    return
-            else:
-                proceed = messagebox.askyesno("تحديث متاح", msg)
-                if not proceed:
-                    return
+            messagebox.showinfo("تحديث متاح", msg)
+            self.status_var.set("يوجد تحديث جديد. جاري تحميل التحديث...")
+            self.update_idletasks()
 
             update_url = str(manifest.get("url", "")).strip()
             expected_sha = str(manifest.get("sha256", "")).strip().upper()
@@ -466,10 +456,12 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
 
             if getattr(sys, "frozen", False):
                 self.schedule_windows_self_update(downloaded_exe)
-                messagebox.showinfo("تحديث", "تم تنزيل التحديث وسيتم إعادة تشغيل البرنامج لتطبيقه.")
+                self.status_var.set("تم تحميل التحديث. سيتم إعادة تشغيل البرنامج الآن.")
+                messagebox.showinfo("تحديث", "تم تحميل التحديث وسيتم إعادة تشغيل البرنامج لتطبيقه.")
                 self.destroy()
                 return
 
+            self.status_var.set("تم تحميل التحديث.")
             messagebox.showinfo(
                 "تحديث",
                 f"تم تنزيل التحديث إلى:\n{downloaded_exe}\n\nشغّل هذا الملف يدويًا.",

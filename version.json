@@ -1,7 +1,7 @@
 {
-  "version": "1.0.1",
-  "url": "https://github.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/releases/download/v1.0.1/bedayti.exe",
-  "sha256": "E0B109B959A15A9510E6EE23B0E1EAB9556E9A65F9A3FF74ECE0D03C581E8CC7",
-  "notes": "Added startup auto-update flow and fixed governorate underscore normalization.",
+  "version": "1.0.2",
+  "url": "https://github.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/releases/download/v1.0.2/bedayti.exe",
+  "sha256": "5753C6EA6196D7FE3765FE6E2AFC0CE629AB48C2D32A8BEFDECD549B17FD3C4B",
+  "notes": "Made update download automatic without user confirmation dialog.",
   "mandatory": false
 }
