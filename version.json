@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "url": "https://github.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/releases/download/v1.0.0/bedayti.exe",
-  "sha256": "85A1985F5DB1F001B83E7E540F10D8281BA11EDBC89B43F7DD84549BC27E1364",
+  "sha256": "8D3C20EDCDFA4EE3B68145BD4B2FE2A254C368023DA5D4A9B8BB75425D07231B",
   "notes": "Initial public release with batching improvements and stability fixes.",
   "mandatory": false
 }
