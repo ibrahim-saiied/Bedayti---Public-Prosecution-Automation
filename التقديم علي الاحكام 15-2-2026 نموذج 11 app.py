@@ -50,7 +50,7 @@ from license_service import (
 # ================= FIX SSL =================
 ssl._create_default_https_context = ssl._create_unverified_context
 
-CURRENT_VERSION = "1.0.3"
+CURRENT_VERSION = "1.0.4"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/main/version.json"
 
 
@@ -58,7 +58,7 @@ UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Bedayti - Public Prosecution Automation")
+        self.title("Bedayti - Public Prosecution Automation v1.03")
         self.geometry("820x340")
         self.resizable(False, False)
         self.configure(bg="#eef2f7")
