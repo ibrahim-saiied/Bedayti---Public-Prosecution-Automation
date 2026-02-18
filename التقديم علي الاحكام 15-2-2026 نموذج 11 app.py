@@ -50,7 +50,7 @@ from license_service import (
 # ================= FIX SSL =================
 ssl._create_default_https_context = ssl._create_unverified_context
 
-CURRENT_VERSION = "1.0.4"
+CURRENT_VERSION = "1.0.5"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/main/version.json"
 
 
@@ -58,7 +58,7 @@ UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Bedayti - Public Prosecution Automation v1.03")
+        self.title("Bedayti - Public Prosecution Automation v1.04")
         self.geometry("820x340")
         self.resizable(False, False)
         self.configure(bg="#eef2f7")
@@ -819,7 +819,7 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
         # أولوية الاختيار بـ data-id حسب طلب التشغيل
         data_id_map = {
             "التقديم علي احكام جنائي": "3",
-            "التقديم علي محاضر شرطة": "0",
+            "التقديم علي محاضر شرطة": "1",
             "الاستعلام عن حالة الطلب": "5",
         }
         target_data_id = data_id_map.get(selected)
