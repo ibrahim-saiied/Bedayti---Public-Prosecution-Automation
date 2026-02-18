@@ -5,6 +5,11 @@ import os
 import shutil
 import re
 import io
+import sys
+import json
+import hashlib
+import subprocess
+import urllib.request
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -44,6 +49,9 @@ from license_service import (
 
 # ================= FIX SSL =================
 ssl._create_default_https_context = ssl._create_unverified_context
+
+CURRENT_VERSION = "1.0.0"
+UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/main/version.json"
 
 
 # ================= GUI =================
@@ -313,6 +321,7 @@ class App(tk.Tk):
         self.state = "idle"  # idle -> waiting_captcha -> ready
         self.set_default_file_paths()
         self.bind_all("<Return>", self.on_enter_pressed)
+        self.after(900, self.check_for_updates_silent)
 
     # ================= HELPERS =================
     def err(self, msg, raise_exc=True):
@@ -341,6 +350,133 @@ class App(tk.Tk):
             except Exception:
                 pass
             time.sleep(tick)
+
+    def parse_version(self, version_text):
+        parts = re.findall(r"\d+", str(version_text or ""))
+        if not parts:
+            return (0,)
+        return tuple(int(p) for p in parts)
+
+    def is_newer_version(self, latest, current):
+        return self.parse_version(latest) > self.parse_version(current)
+
+    def fetch_update_manifest(self, timeout=10):
+        req = urllib.request.Request(UPDATE_MANIFEST_URL, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+        return json.loads(raw)
+
+    def sha256_file(self, path):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest().upper()
+
+    def download_update_file(self, url, dst_path, timeout=25):
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+        with open(dst_path, "wb") as f:
+            f.write(data)
+
+    def schedule_windows_self_update(self, new_exe_path):
+        current_exe = Path(sys.executable).resolve()
+        updates_dir = Path(new_exe_path).parent
+        script_path = updates_dir / "apply_update.ps1"
+        script_text = f"""
+$ErrorActionPreference = "SilentlyContinue"
+$src = '{str(new_exe_path).replace("'", "''")}'
+$dst = '{str(current_exe).replace("'", "''")}'
+Start-Sleep -Seconds 2
+$ok = $false
+for ($i = 0; $i -lt 20; $i++) {{
+  try {{
+    Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop
+    $ok = $true
+    break
+  }} catch {{
+    Start-Sleep -Milliseconds 700
+  }}
+}}
+if ($ok) {{
+  Start-Process -FilePath $dst
+  Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue
+}}
+Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
+"""
+        script_path.write_text(script_text, encoding="utf-8")
+        subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path),
+            ],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def check_for_updates_silent(self):
+        try:
+            manifest = self.fetch_update_manifest(timeout=8)
+            latest = str(manifest.get("version", "")).strip()
+            if not latest or not self.is_newer_version(latest, CURRENT_VERSION):
+                return
+
+            notes = str(manifest.get("notes", "")).strip()
+            mandatory = bool(manifest.get("mandatory", False))
+            msg = f"يوجد تحديث جديد للإصدار {latest}."
+            if notes:
+                msg += f"\n\nملاحظات:\n{notes}"
+            msg += "\n\nهل تريد تنزيله الآن؟"
+
+            if mandatory:
+                proceed = messagebox.askyesno("تحديث إجباري", msg)
+                if not proceed:
+                    messagebox.showwarning("تحديث مطلوب", "يجب التحديث قبل المتابعة.")
+                    self.destroy()
+                    return
+            else:
+                proceed = messagebox.askyesno("تحديث متاح", msg)
+                if not proceed:
+                    return
+
+            update_url = str(manifest.get("url", "")).strip()
+            expected_sha = str(manifest.get("sha256", "")).strip().upper()
+            if not update_url:
+                messagebox.showerror("تحديث", "رابط التحديث غير متاح.")
+                return
+
+            updates_dir = self.script_dir / "updates"
+            updates_dir.mkdir(parents=True, exist_ok=True)
+            downloaded_exe = updates_dir / "bedayti.new.exe"
+            self.download_update_file(update_url, downloaded_exe, timeout=35)
+
+            if expected_sha:
+                actual_sha = self.sha256_file(downloaded_exe)
+                if actual_sha != expected_sha:
+                    try:
+                        downloaded_exe.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    messagebox.showerror("تحديث", "فشل التحقق من سلامة ملف التحديث (SHA256).")
+                    return
+
+            if getattr(sys, "frozen", False):
+                self.schedule_windows_self_update(downloaded_exe)
+                messagebox.showinfo("تحديث", "تم تنزيل التحديث وسيتم إعادة تشغيل البرنامج لتطبيقه.")
+                self.destroy()
+                return
+
+            messagebox.showinfo(
+                "تحديث",
+                f"تم تنزيل التحديث إلى:\n{downloaded_exe}\n\nشغّل هذا الملف يدويًا.",
+            )
+        except Exception:
+            # لا توقف البرنامج إذا فشل فحص التحديث.
+            return
 
     def hide_prestart_widgets(self):
         for w in (self.files_frame,):
@@ -471,7 +607,10 @@ class App(tk.Tk):
     def get_case(self, row, col):
         if col not in row or pd.isna(row[col]):
             self.err(f"الحقل [{col}] ناقص في Cases_Data\nصف {row.name+2}")
-        return str(row[col]).strip()
+        value = str(row[col]).strip()
+        if col == "المحافظة":
+            value = value.replace("_", " ")
+        return value
 
     def clear_and_type(self, locator_by, locator_value, text):
         e = self.wait.until(EC.presence_of_element_located((locator_by, locator_value)))
