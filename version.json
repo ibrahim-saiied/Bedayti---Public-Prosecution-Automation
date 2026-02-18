@@ -1,7 +1,7 @@
 {
-  "version": "1.0.2",
-  "url": "https://github.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/releases/download/v1.0.2/bedayti.exe",
-  "sha256": "5753C6EA6196D7FE3765FE6E2AFC0CE629AB48C2D32A8BEFDECD549B17FD3C4B",
-  "notes": "Made update download automatic without user confirmation dialog.",
+  "version": "1.0.3",
+  "url": "https://github.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/releases/download/v1.0.3/bedayti.exe",
+  "sha256": "A4D1CF7AA8E3C3F727CF95342B98A45529846AF98CBDEA8B5423DF62254BB95F",
+  "notes": "Fix update loop by aligning internal app version with published release.",
   "mandatory": false
 }
