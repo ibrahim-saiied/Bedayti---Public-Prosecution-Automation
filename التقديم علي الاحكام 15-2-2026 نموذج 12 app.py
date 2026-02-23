@@ -52,7 +52,7 @@ from license_service import (
 # ================= FIX SSL =================
 ssl._create_default_https_context = ssl._create_unverified_context
 
-CURRENT_VERSION = "1.10"
+CURRENT_VERSION = "1.11"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/main/version.json"
 
 
@@ -60,7 +60,7 @@ UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Bedayti - Public Prosecution Automation v1.10")
+        self.title("Bedayti - Public Prosecution Automation v1.11")
         self.geometry("820x340")
         self.resizable(False, False)
         self.configure(bg="#eef2f7")
@@ -193,7 +193,7 @@ class App(tk.Tk):
 
         tk.Label(
             self.header_left,
-            text="Bedayti - Public Prosecution Automation System v1.10",
+            text="Bedayti - Public Prosecution Automation System v1.11",
             font=("Segoe UI", 16, "bold"),
             bg="#0f172a",
             fg="white"
@@ -592,13 +592,22 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
             service = Service(str(local_driver))
             return webdriver.Chrome(service=service, options=options)
 
-        # 2) Try Selenium Manager (uses PATH / auto resolution)
+        # 2) Prefer chromedriver الموجود في PATH (أسرع من Selenium Manager غالبًا)
+        path_driver = shutil.which("chromedriver")
+        if path_driver:
+            try:
+                service = Service(path_driver)
+                return webdriver.Chrome(service=service, options=options)
+            except Exception:
+                pass
+
+        # 3) Try Selenium Manager (uses PATH / auto resolution)
         try:
             return webdriver.Chrome(options=options)
         except Exception:
             pass
 
-        # 3) Fallback to webdriver_manager with SSL verify disabled
+        # 4) Fallback to webdriver_manager with SSL verify disabled
         # Useful behind company proxy/self-signed cert chains.
         os.environ.setdefault("WDM_SSL_VERIFY", "0")
         service = Service(ChromeDriverManager().install())
@@ -991,14 +1000,14 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
             key = (self.license_key.get() or "").strip()
             if not key:
                 self.err("ادخل License أولًا.")
-            ok, reason = verify_license_online(key)
+            self.status_var.set("جاري التحقق من الترخيص...")
+            ok, reason = verify_license_online(key, timeout=7)
             if not ok:
                 self.err(f"فشل التحقق من License: {reason}")
             save_license_key(key)
             self.session_submitted_requests = 0
             self.session_counted_case_indices = set()
-            log_usage_online(key, submitted_requests=self.session_submitted_requests)
-
+            self.status_var.set("جاري قراءة بيانات Excel...")
             self.load_input_data(include_cases=(self.is_automation_service() or self.is_inquiry_service()))
 
             # Chrome using local chromedriver
@@ -1006,6 +1015,7 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
             options.add_argument("--start-maximized")
             options.add_experimental_option("detach", True)
 
+            self.status_var.set("جاري فتح المتصفح...")
             self.driver = self.build_driver(options)
             self.wait = WebDriverWait(self.driver, 30)
 
@@ -1721,51 +1731,7 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
         return ""
 
     def prepare_all_cases_tabs(self):
-        d, w = self.driver, self.wait
-        try:
-            total = len(self.cases)
-            if total == 0:
-                self.err("Cases_Data فاضي")
-
-            try:
-                self.step_frame.pack_forget()
-            except Exception:
-                pass
-            self.next_btn.config(state=tk.DISABLED)
-            self.state = "ready"
-            self.current_index = 0
-            self.case_tabs = []
-            self.batch_case_indices = []
-            self.current_batch_start = 0
-
-            d.switch_to.default_content()
-            w.until(EC.presence_of_element_located(self.get_profile_locator("request_ready")))
-            if not self.request_url:
-                self.request_url = d.current_url
-
-            step = max(1, int(self.max_open_tabs))
-            for start_idx in range(0, total, step):
-                end_idx = min(total, start_idx + step)
-                self.status_var.set(f"تجهيز الطلبات {start_idx+1} - {end_idx} من {total} ...")
-
-                for global_idx in range(start_idx, end_idx):
-                    if len(self.case_tabs) == 0:
-                        d.get(self.request_url)
-                        d.switch_to.default_content()
-                        w.until(EC.presence_of_element_located(self.get_profile_locator("request_ready")))
-                    else:
-                        self.open_request_tab(self.request_url)
-
-                    row = self.cases.iloc[global_idx]
-                    self.prepare_case_in_current_tab(row, global_idx, total)
-                    self.case_tabs.append(d.current_window_handle)
-                    self.batch_case_indices.append(global_idx)
-
-            self.current_index = 0
-            self.activate_current_case_for_captcha()
-            messagebox.showinfo("جاهز", f"تم تجهيز كل الطلبات ({total}).\nابدأ الآن إدخال الكابتشا من الطلب الأول.")
-        except Exception as e:
-            self.err(f"فشل تجهيز الطلبات في التبويبات: {e}", raise_exc=False)
+        self.prepare_cases_batch(0)
 
     def close_extra_case_tabs(self):
         d = self.driver
@@ -1931,6 +1897,15 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
             self.next_btn.config(state=tk.DISABLED)
 
             if self.current_index + 1 >= len(self.case_tabs):
+                processed_until = self.current_batch_start + len(self.batch_case_indices)
+                if processed_until < len(self.cases):
+                    self.status_var.set(
+                        f"انتهت الدفعة الحالية. تجهيز الدفعة التالية ({processed_until+1}/{len(self.cases)})..."
+                    )
+                    self.close_extra_case_tabs()
+                    self.prepare_cases_batch(processed_until)
+                    return
+
                 self.status_var.set("تم تقديم كل الطلبات والتحقق من أرقامها...")
                 self.save_request_numbers_to_excel()
                 log_usage_online(
