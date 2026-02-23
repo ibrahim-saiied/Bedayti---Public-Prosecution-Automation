@@ -9,10 +9,12 @@ import sys
 import json
 import hashlib
 import subprocess
+import threading
 import urllib.request
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from tkinter import ttk
 from difflib import get_close_matches
 from pathlib import Path
 from openpyxl import load_workbook
@@ -50,7 +52,7 @@ from license_service import (
 # ================= FIX SSL =================
 ssl._create_default_https_context = ssl._create_unverified_context
 
-CURRENT_VERSION = "1.9"
+CURRENT_VERSION = "1.10"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/main/version.json"
 
 
@@ -58,7 +60,7 @@ UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Bedayti - Public Prosecution Automation v1.9")
+        self.title("Bedayti - Public Prosecution Automation v1.10")
         self.geometry("820x340")
         self.resizable(False, False)
         self.configure(bg="#eef2f7")
@@ -191,7 +193,7 @@ class App(tk.Tk):
 
         tk.Label(
             self.header_left,
-            text="Bedayti - Public Prosecution Automation System v1.9",
+            text="Bedayti - Public Prosecution Automation System v1.10",
             font=("Segoe UI", 16, "bold"),
             bg="#0f172a",
             fg="white"
@@ -306,6 +308,29 @@ class App(tk.Tk):
         )
         self.next_btn.pack(side=tk.LEFT)
 
+        # حالة التشغيل + تقدم تحميل التحديث
+        self.status_frame = tk.Frame(self.main_card, bg="white")
+        self.status_frame.pack(fill=tk.X, pady=(0, 6))
+        self.status_label = tk.Label(
+            self.status_frame,
+            textvariable=self.status_var,
+            bg="white",
+            fg="#334155",
+            anchor="w",
+            justify="left"
+        )
+        self.status_label.pack(fill=tk.X)
+        self.update_progress_var = tk.DoubleVar(value=0.0)
+        self.update_progress_bar = ttk.Progressbar(
+            self.status_frame,
+            orient="horizontal",
+            mode="determinate",
+            variable=self.update_progress_var,
+            maximum=100
+        )
+        self.update_progress_bar.pack(fill=tk.X, pady=(4, 0))
+        self.update_progress_bar.pack_forget()
+
         self.driver = None
         self.wait = None
         self.fixed = {}
@@ -376,9 +401,54 @@ class App(tk.Tk):
     def download_update_file(self, url, dst_path, timeout=25):
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read()
-        with open(dst_path, "wb") as f:
-            f.write(data)
+            total = int(resp.headers.get("Content-Length") or 0)
+            downloaded = 0
+            chunk_size = 1024 * 256
+            with open(dst_path, "wb") as f:
+                while True:
+                    chunk = resp.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    self._on_update_download_progress(downloaded, total)
+        self._on_update_download_progress(downloaded, total)
+
+    def _show_update_progress(self):
+        try:
+            if not self.update_progress_bar.winfo_ismapped():
+                self.update_progress_bar.pack(fill=tk.X, pady=(4, 0))
+            self.update_progress_var.set(0.0)
+        except Exception:
+            pass
+
+    def _hide_update_progress(self):
+        try:
+            if self.update_progress_bar.winfo_ismapped():
+                self.update_progress_bar.pack_forget()
+            self.update_progress_var.set(0.0)
+        except Exception:
+            pass
+
+    def _on_update_download_progress(self, downloaded, total):
+        try:
+            if total > 0:
+                percent = max(0.0, min(100.0, (downloaded / total) * 100.0))
+                msg = f"جاري تحميل التحديث... {percent:.0f}%"
+            else:
+                kb = int(downloaded / 1024)
+                percent = 0.0
+                msg = f"جاري تحميل التحديث... {kb} KB"
+            self.after(0, lambda p=percent, m=msg: self._set_update_progress_ui(p, m))
+        except Exception:
+            pass
+
+    def _set_update_progress_ui(self, percent, message_text):
+        try:
+            self.status_var.set(message_text)
+            self.update_progress_var.set(percent)
+        except Exception:
+            pass
 
     def schedule_windows_self_update(self, new_exe_path):
         current_exe = Path(sys.executable).resolve()
@@ -419,30 +489,33 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
         )
 
     def check_for_updates_silent(self):
+        if getattr(self, "_update_check_started", False):
+            return
+        self._update_check_started = True
+        t = threading.Thread(target=self._update_worker, daemon=True)
+        t.start()
+
+    def _update_worker(self):
         try:
             manifest = self.fetch_update_manifest(timeout=8)
             latest = str(manifest.get("version", "")).strip()
             if not latest or not self.is_newer_version(latest, CURRENT_VERSION):
                 return
 
-            notes = str(manifest.get("notes", "")).strip()
-            msg = f"يوجد تحديث جديد للإصدار {latest}."
-            if notes:
-                msg += f"\n\nملاحظات:\n{notes}"
-            messagebox.showinfo("تحديث متاح", msg)
-            self.status_var.set("يوجد تحديث جديد. جاري تحميل التحديث...")
-            self.update_idletasks()
+            self.after(0, self._show_update_progress)
+            self.after(0, lambda: self.status_var.set(f"يوجد تحديث جديد ({latest}). جاري التحميل..."))
 
             update_url = str(manifest.get("url", "")).strip()
             expected_sha = str(manifest.get("sha256", "")).strip().upper()
             if not update_url:
-                messagebox.showerror("تحديث", "رابط التحديث غير متاح.")
+                self.after(0, self._hide_update_progress)
+                self.after(0, lambda: messagebox.showerror("تحديث", "رابط التحديث غير متاح."))
                 return
 
             updates_dir = self.script_dir / "updates"
             updates_dir.mkdir(parents=True, exist_ok=True)
             downloaded_exe = updates_dir / "bedayti.new.exe"
-            self.download_update_file(update_url, downloaded_exe, timeout=35)
+            self.download_update_file(update_url, downloaded_exe, timeout=180)
 
             if expected_sha:
                 actual_sha = self.sha256_file(downloaded_exe)
@@ -451,24 +524,31 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
                         downloaded_exe.unlink(missing_ok=True)
                     except Exception:
                         pass
-                    messagebox.showerror("تحديث", "فشل التحقق من سلامة ملف التحديث (SHA256).")
+                    self.after(0, self._hide_update_progress)
+                    self.after(0, lambda: messagebox.showerror("تحديث", "فشل التحقق من سلامة ملف التحديث (SHA256)."))
                     return
 
             if getattr(sys, "frozen", False):
-                self.schedule_windows_self_update(downloaded_exe)
-                self.status_var.set("تم تحميل التحديث. سيتم إعادة تشغيل البرنامج الآن.")
-                messagebox.showinfo("تحديث", "تم تحميل التحديث وسيتم إعادة تشغيل البرنامج لتطبيقه.")
-                self.destroy()
+                self.after(0, lambda p=downloaded_exe: self._apply_downloaded_update(p))
                 return
 
-            self.status_var.set("تم تحميل التحديث.")
-            messagebox.showinfo(
+            self.after(0, lambda: self.status_var.set("تم تحميل التحديث."))
+            self.after(0, self._hide_update_progress)
+            self.after(0, lambda p=downloaded_exe: messagebox.showinfo(
                 "تحديث",
-                f"تم تنزيل التحديث إلى:\n{downloaded_exe}\n\nشغّل هذا الملف يدويًا.",
-            )
+                f"تم تنزيل التحديث إلى:\n{p}\n\nشغّل هذا الملف يدويًا.",
+            ))
         except Exception:
             # لا توقف البرنامج إذا فشل فحص التحديث.
+            self.after(0, self._hide_update_progress)
             return
+
+    def _apply_downloaded_update(self, downloaded_exe):
+        self._hide_update_progress()
+        self.schedule_windows_self_update(downloaded_exe)
+        self.status_var.set("تم تحميل التحديث. سيتم إعادة تشغيل البرنامج الآن.")
+        messagebox.showinfo("تحديث", "تم تحميل التحديث وسيتم إعادة تشغيل البرنامج لتطبيقه.")
+        self.destroy()
 
     def hide_prestart_widgets(self):
         for w in (self.files_frame,):
