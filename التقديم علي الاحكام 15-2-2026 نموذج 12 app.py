@@ -11,6 +11,7 @@ import hashlib
 import subprocess
 import threading
 import urllib.request
+import urllib.error
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -52,7 +53,7 @@ from license_service import (
 # ================= FIX SSL =================
 ssl._create_default_https_context = ssl._create_unverified_context
 
-CURRENT_VERSION = "1.11"
+CURRENT_VERSION = "1.12"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/main/version.json"
 
 
@@ -60,8 +61,8 @@ UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Bedayti - Public Prosecution Automation v1.11")
-        self.geometry("820x340")
+        self.title("Bedayti - Public Prosecution Automation v1.12")
+        self.geometry("820x370")
         self.resizable(False, False)
         self.configure(bg="#eef2f7")
 
@@ -193,7 +194,7 @@ class App(tk.Tk):
 
         tk.Label(
             self.header_left,
-            text="Bedayti - Public Prosecution Automation System v1.11",
+            text="Bedayti - Public Prosecution Automation System v1.12",
             font=("Segoe UI", 16, "bold"),
             bg="#0f172a",
             fg="white"
@@ -398,13 +399,60 @@ class App(tk.Tk):
                 h.update(chunk)
         return h.hexdigest().upper()
 
+    def _parse_total_from_content_range(self, content_range):
+        # Example: "bytes 100-999/1000"
+        if not content_range:
+            return 0
+        try:
+            total_part = str(content_range).split("/")[-1].strip()
+            return int(total_part) if total_part.isdigit() else 0
+        except Exception:
+            return 0
+
     def download_update_file(self, url, dst_path, timeout=25):
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            total = int(resp.headers.get("Content-Length") or 0)
-            downloaded = 0
-            chunk_size = 1024 * 256
-            with open(dst_path, "wb") as f:
+        dst = Path(dst_path)
+        part_path = dst.with_suffix(".part")
+        existing = part_path.stat().st_size if part_path.exists() else 0
+
+        headers = {"User-Agent": "BedaytiUpdater/1.0", "Accept-Encoding": "identity"}
+        if existing > 0:
+            headers["Range"] = f"bytes={existing}-"
+
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            # بعض السيرفرات لا تدعم الاستكمال (Range)
+            if e.code != 416:
+                raise
+            existing = 0
+            if part_path.exists():
+                part_path.unlink(missing_ok=True)
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "BedaytiUpdater/1.0", "Accept-Encoding": "identity"},
+                method="GET",
+            )
+            resp = urllib.request.urlopen(req, timeout=timeout)
+
+        with resp:
+            status = int(getattr(resp, "status", 200))
+            content_len = int(resp.headers.get("Content-Length") or 0)
+            content_range = resp.headers.get("Content-Range")
+            range_total = self._parse_total_from_content_range(content_range)
+
+            if status != 206:
+                # السيرفر رجع الملف كامل، نبدأ من الصفر
+                existing = 0
+                mode = "wb"
+                total = content_len
+            else:
+                mode = "ab"
+                total = range_total or (existing + content_len)
+
+            downloaded = existing
+            chunk_size = 1024 * 1024
+            with open(part_path, mode) as f:
                 while True:
                     chunk = resp.read(chunk_size)
                     if not chunk:
@@ -412,6 +460,8 @@ class App(tk.Tk):
                     f.write(chunk)
                     downloaded += len(chunk)
                     self._on_update_download_progress(downloaded, total)
+
+        part_path.replace(dst)
         self._on_update_download_progress(downloaded, total)
 
     def _show_update_progress(self):
@@ -515,7 +565,20 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
             updates_dir = self.script_dir / "updates"
             updates_dir.mkdir(parents=True, exist_ok=True)
             downloaded_exe = updates_dir / "bedayti.new.exe"
-            self.download_update_file(update_url, downloaded_exe, timeout=180)
+
+            # لو التحديث موجود مسبقًا وصحيح، نتخطى إعادة التحميل.
+            if expected_sha and downloaded_exe.exists():
+                try:
+                    cached_sha = self.sha256_file(downloaded_exe)
+                    if cached_sha == expected_sha:
+                        self.after(0, lambda: self.status_var.set("تم العثور على التحديث مسبقًا. جاري التطبيق..."))
+                    else:
+                        downloaded_exe.unlink(missing_ok=True)
+                except Exception:
+                    downloaded_exe.unlink(missing_ok=True)
+
+            if not downloaded_exe.exists():
+                self.download_update_file(update_url, downloaded_exe, timeout=180)
 
             if expected_sha:
                 actual_sha = self.sha256_file(downloaded_exe)
