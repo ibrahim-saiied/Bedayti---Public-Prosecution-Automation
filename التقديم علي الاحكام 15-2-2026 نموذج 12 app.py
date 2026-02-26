@@ -12,6 +12,7 @@ import subprocess
 import threading
 import urllib.request
 import urllib.error
+import webbrowser
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -53,7 +54,7 @@ from license_service import (
 # ================= FIX SSL =================
 ssl._create_default_https_context = ssl._create_unverified_context
 
-CURRENT_VERSION = "1.13"
+CURRENT_VERSION = "1.14"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti---Public-Prosecution-Automation/main/version.json"
 
 
@@ -61,7 +62,7 @@ UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/ibrahim-saiied/Bedayti-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Bedayti - Public Prosecution Automation v1.13")
+        self.title("Bedayti - Public Prosecution Automation v1.14")
         self.geometry("820x370")
         self.resizable(False, False)
         self.configure(bg="#eef2f7")
@@ -194,7 +195,7 @@ class App(tk.Tk):
 
         tk.Label(
             self.header_left,
-            text="Bedayti - Public Prosecution Automation System v1.13",
+            text="Bedayti - Public Prosecution Automation System v1.14",
             font=("Segoe UI", 16, "bold"),
             bg="#0f172a",
             fg="white"
@@ -340,7 +341,7 @@ class App(tk.Tk):
         self.case_tabs = []
         self.batch_case_indices = []
         self.current_batch_start = 0
-        self.max_open_tabs = 10
+        self.max_open_tabs = 20
         self.request_url = ""
         self.session_submitted_requests = 0
         self.session_counted_case_indices = set()
@@ -545,6 +546,24 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
         t = threading.Thread(target=self._update_worker, daemon=True)
         t.start()
 
+    def _notify_update_link(self, latest, update_url):
+        message = (
+            f"يوجد إصدار جديد: {latest}\n\n"
+            "سيتم فتح رابط التحميل المباشر الآن.\n"
+            "هل تريد فتح صفحة التحميل؟"
+        )
+        open_now = messagebox.askyesno("تحديث جديد", message)
+        if open_now:
+            try:
+                webbrowser.open(update_url, new=2)
+                self.status_var.set(f"تم فتح رابط التحديث: v{latest}")
+            except Exception as e:
+                self.status_var.set(f"تعذر فتح رابط التحديث: {e}")
+                messagebox.showerror("تحديث", f"تعذر فتح الرابط تلقائيًا:\n{update_url}")
+        else:
+            self.status_var.set(f"يوجد تحديث v{latest} متاح للتحميل.")
+            messagebox.showinfo("رابط التحديث", f"رابط التحميل المباشر:\n{update_url}")
+
     def _update_worker(self):
         try:
             manifest = self.fetch_update_manifest(timeout=8)
@@ -552,58 +571,16 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
             if not latest or not self.is_newer_version(latest, CURRENT_VERSION):
                 return
 
-            self.after(0, self._show_update_progress)
-            self.after(0, lambda: self.status_var.set(f"يوجد تحديث جديد ({latest}). جاري التحميل..."))
-
             update_url = str(manifest.get("url", "")).strip()
-            expected_sha = str(manifest.get("sha256", "")).strip().upper()
             if not update_url:
-                self.after(0, self._hide_update_progress)
                 self.after(0, lambda: messagebox.showerror("تحديث", "رابط التحديث غير متاح."))
                 return
 
-            updates_dir = self.script_dir / "updates"
-            updates_dir.mkdir(parents=True, exist_ok=True)
-            downloaded_exe = updates_dir / "bedayti.new.exe"
-
-            # لو التحديث موجود مسبقًا وصحيح، نتخطى إعادة التحميل.
-            if expected_sha and downloaded_exe.exists():
-                try:
-                    cached_sha = self.sha256_file(downloaded_exe)
-                    if cached_sha == expected_sha:
-                        self.after(0, lambda: self.status_var.set("تم العثور على التحديث مسبقًا. جاري التطبيق..."))
-                    else:
-                        downloaded_exe.unlink(missing_ok=True)
-                except Exception:
-                    downloaded_exe.unlink(missing_ok=True)
-
-            if not downloaded_exe.exists():
-                self.download_update_file(update_url, downloaded_exe, timeout=180)
-
-            if expected_sha:
-                actual_sha = self.sha256_file(downloaded_exe)
-                if actual_sha != expected_sha:
-                    try:
-                        downloaded_exe.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    self.after(0, self._hide_update_progress)
-                    self.after(0, lambda: messagebox.showerror("تحديث", "فشل التحقق من سلامة ملف التحديث (SHA256)."))
-                    return
-
-            if getattr(sys, "frozen", False):
-                self.after(0, lambda p=downloaded_exe: self._apply_downloaded_update(p))
-                return
-
-            self.after(0, lambda: self.status_var.set("تم تحميل التحديث."))
-            self.after(0, self._hide_update_progress)
-            self.after(0, lambda p=downloaded_exe: messagebox.showinfo(
-                "تحديث",
-                f"تم تنزيل التحديث إلى:\n{p}\n\nشغّل هذا الملف يدويًا.",
-            ))
-        except Exception:
+            self.after(0, lambda l=latest, u=update_url: self._notify_update_link(l, u))
+        except Exception as e:
             # لا توقف البرنامج إذا فشل فحص التحديث.
             self.after(0, self._hide_update_progress)
+            self.after(0, lambda msg=str(e): self.status_var.set(f"فشل فحص التحديث: {msg}"))
             return
 
     def _apply_downloaded_update(self, downloaded_exe):
